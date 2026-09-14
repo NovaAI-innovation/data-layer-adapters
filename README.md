@@ -1,23 +1,43 @@
-# data-layer-adapters (placeholder)
+# data-layer-adapters
 
-**Status:** placeholder. Implementation lives in its own repository.
+Multi-framework adapter collection for the data-layer stack.
 
-**Upstream:** `github.com/NovaAI-innovation/data-layer-adapters`
+This project owns framework-specific code (plugin glue, prompts, hooks) and
+framework-specific seed rows. It is framework-agnostic in the sense that
+the postgres schema lives elsewhere (`../data-layer-postgres/`) and the
+MCP server is universal (`mcp/`).
 
-This directory is reserved by the `data-layer` umbrella as a wiring slot.
-When the upstream repo is cloned here (or linked via `.gitmodules`), it owns:
+## Layout
 
-- `lib/install.sh` — idempotent applier (`install | verify | status | reset`)
-- Per-framework subdirectories (e.g. `a0/`) holding each framework adapter's plugin glue, MCP wiring, prompts, hooks
-- `docs/adapters.md` — how each framework adapter consumes the service-level DSNs
-- `docs/decisions/` — ADRs (append-only)
+```
+data-layer-adapters/
+├── agent-zero/                  # Agent Zero framework family (Jan Tomasek)
+│   ├── bootstrap                # install | verify | status | reset | seed
+│   ├── lib/                     # A0-specific install scripts
+│   ├── plugin/                  # A0 plugin code (data_management etc.)
+│   ├── prompts/                 # A0-specific prompt overrides
+│   └── seeds/                   # A0 DB seed rows (idempotent)
+├── hermes-agent/                # Hermes framework family (Nous Research)
+│   ├── bootstrap                # same shape as agent-zero
+│   ├── lib/, plugin/, prompts/, seeds/
+├── mcp/                         # UNIVERSAL MCP server (not framework-specific)
+│   ├── server.py
+│   └── tools/
+├── langchain/                   # future
+└── crewai/                      # future
+```
 
-## Contract with the umbrella
+## Per-adapter commands
 
-`bootstrap adapters` will shell-out to `lib/install.sh install` here. The
-submodule must:
+```bash
+bash agent-zero/bootstrap seed       # apply A0 seed rows
+bash hermes-agent/bootstrap seed     # apply Hermes seed rows
+bash mcp/server.py                  # run the universal MCP server (stdio)
+```
 
-1. Expose `lib/install.sh` with subcommands: `install`, `verify`, `status`, `reset`.
-2. Read each per-adapter env from `$DATA_LAYER_ADAPTERS_<FRAMEWORK>_*` (set in `.env.example`).
-3. Be idempotent: re-running `install` must be a no-op when already wired.
-4. Return non-zero exit on `verify` failure so the umbrella's smoke test catches it.
+## Universal MCP
+
+The MCP server in `mcp/` speaks the MCP protocol (2024-11-05). It is
+not coupled to any framework. Tools are addressed by name; per-framework
+tool variants live under `mcp/tools/<framework>/` when needed but the
+server itself is universal.

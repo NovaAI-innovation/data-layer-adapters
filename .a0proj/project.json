@@ -1,0 +1,16 @@
+{
+  "title": "data-layer-adapters",
+  "description": "Multi-framework adapter collection for the data-layer stack. Holds framework-specific plugin glue, prompts, and DB seed rows. The MCP server under mcp/ is universal and framework-agnostic. Wired into the data-layer umbrella as a sibling submodule.",
+  "instructions": "## data-layer-adapters — Multi-Framework Adapter Collection\n\nACTIVE WORKSPACE: /a0/usr/projects/data-layer/data-layer-adapters. Owns framework-specific code and DB seed rows; does NOT own the postgres schema, redis cache, falkordb graph, or umbrella orchestration.\n\n## Per-framework subdirs\n\n- agent-zero/ — Agent Zero framework family\n- hermes-agent/ — Hermes framework family (Nous Research)\n- langchain/, crewai/ — future framework families\n\nEach ships its own bootstrap (install | verify | status | reset | seed) and its own seeds/ directory.\n\n## Universal MCP\n\nmcp/server.py is universal. Per-framework tool variants live under mcp/tools/<framework>/ when needed.",
+  "include_agents_md": true,
+  "color": "",
+  "git_url": "https://github.com/NovaAI-innovation/data-layer-adapters",
+  "file_structure": {
+    "enabled": true,
+    "max_depth": 5,
+    "max_files": 20,
+    "max_folders": 20,
+    "max_lines": 250,
+    "gitignore": ""
+  }
+}

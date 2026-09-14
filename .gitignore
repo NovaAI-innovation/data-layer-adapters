@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.a0proj/secrets.env
+.a0proj/memory/
+.a0proj/knowledge/fragments/
+*.faiss
+*.faiss.sha256
+*.pkl
+*.tar.gz
+*.bak
+.vscode/
+.idea/
+.DS_Store

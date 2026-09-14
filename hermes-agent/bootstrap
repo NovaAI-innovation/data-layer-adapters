@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# hermes-agent/bootstrap
+# Subcommands: install | verify | status | reset | seed
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+DSN="${DATA_LAYER_POSTGRES_DSN:-postgresql://postgres@localhost:5432/postgres}"
+HERMES_NAME="${DATA_LAYER_HERMES_CONTAINER_NAME:-__HERMES_CONTAINER_NAME__}"
+log()  { printf '[hermes-agent %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+fail() { printf '[hermes-agent FAIL] %s\n' "$*" >&2; exit 3; }
+usage() { cat <<USAGE
+Usage: $0 <install|verify|status|reset|seed>
+USAGE
+}
+seed_one() {
+  local file="$1" name="$2"
+  [[ -f "$file" ]] || fail "missing $file"
+  local tmp; tmp=$(mktemp)
+  sed -e "s|__HERMES_CONTAINER_NAME__|$HERMES_NAME|g" "$file" > "$tmp"
+  psql "$DSN" -v ON_ERROR_STOP=1 -X -tAc -f "$tmp" >/dev/null || fail "$name seed failed"
+  rm -f "$tmp"
+  log "$name applied"
+}
+case "${1:-help}" in
+  install) log "install: hermes plugin glue lives in lib/plugin.sh (not yet implemented)"; exit 0 ;;
+  verify)  log "verify: seed integrity check would go here"; exit 0 ;;
+  status)  echo "DSN: $DSN"; echo "hermes container: $HERMES_NAME"; exit 0 ;;
+  reset)   log "reset is a no-op for a hermes adapter"; exit 0 ;;
+  seed)    seed_one "$ROOT/seeds/0001_seed_hermes.sql" "hermes_agent" ;;
+  help|--help|-h|"") usage ;;
+  *) echo "unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
+esac

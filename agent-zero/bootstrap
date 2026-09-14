@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# agent-zero/bootstrap
+# Subcommands: install | verify | status | reset | seed
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+DSN="${DATA_LAYER_POSTGRES_DSN:-postgresql://postgres@localhost:5432/postgres}"
+LOCAL_NAME="${DATA_LAYER_LOCAL_CONTAINER_NAME:-__LOCAL_CONTAINER_NAME__}"
+log()  { printf '[agent-zero %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+fail() { printf '[agent-zero FAIL] %s\n' "$*" >&2; exit 3; }
+usage() { cat <<USAGE
+Usage: $0 <install|verify|status|reset|seed>
+USAGE
+}
+seed_one() {
+  local file="$1" name="$2"
+  [[ -f "$file" ]] || fail "missing $file"
+  local tmp; tmp=$(mktemp)
+  sed -e "s|__LOCAL_CONTAINER_NAME__|$LOCAL_NAME|g" "$file" > "$tmp"
+  psql "$DSN" -v ON_ERROR_STOP=1 -X -tAc -f "$tmp" >/dev/null || fail "$name seed failed"
+  rm -f "$tmp"
+  log "$name applied"
+}
+case "${1:-help}" in
+  install) log "install: plugin glue lives in lib/plugin.sh (not yet implemented)"; exit 0 ;;
+  verify)  log "verify: seed integrity check would go here"; exit 0 ;;
+  status)  echo "DSN: $DSN"; echo "local container: $LOCAL_NAME"; exit 0 ;;
+  reset)   log "reset is a no-op for an agent-zero adapter"; exit 0 ;;
+  seed)
+    seed_one "$ROOT/seeds/0001_default_agent.sql" "default_agent"
+    [[ -n "${DATA_LAYER_RUN_MIGRATE:-}" ]] && seed_one "$ROOT/seeds/0002_migrate_local_id.sql" "migrate_local_id"
+    ;;
+  help|--help|-h|"") usage ;;
+  *) echo "unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
+esac
