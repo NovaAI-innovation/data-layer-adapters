@@ -12,3 +12,15 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# === FAISS memory system (per-developer-agent runtime state, not source) ===
+# All instances of the FAISS memory artifacts belong to the agent that
+# built them, not to the data-layer stack. Exclude from every repo.
+.a0proj/memory/
+.a0proj/knowledge/
+.a0proj/skills/
+*.faiss
+*.faiss.sha256
+*.pkl
+embedding.json
+knowledge_import.json
