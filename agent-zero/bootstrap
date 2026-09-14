@@ -21,7 +21,11 @@ seed_one() {
   log "$name applied"
 }
 case "${1:-help}" in
-  install) log "install: plugin glue lives in lib/plugin.sh (not yet implemented)"; exit 0 ;;
+  install)
+    bash "$ROOT/lib/deps.sh"
+    bash "$ROOT/lib/plugin.sh"
+    log "install complete"
+    ;;
   verify)  log "verify: seed integrity check would go here"; exit 0 ;;
   status)  echo "DSN: $DSN"; echo "local container: $LOCAL_NAME"; exit 0 ;;
   reset)   log "reset is a no-op for an agent-zero adapter"; exit 0 ;;
