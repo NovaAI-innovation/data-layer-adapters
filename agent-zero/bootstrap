@@ -16,7 +16,7 @@ seed_one() {
   [[ -f "$file" ]] || fail "missing $file"
   local tmp; tmp=$(mktemp)
   sed -e "s|__LOCAL_CONTAINER_NAME__|$LOCAL_NAME|g" "$file" > "$tmp"
-  psql "$DSN" -v ON_ERROR_STOP=1 -X -tAc -f "$tmp" >/dev/null || fail "$name seed failed"
+  psql "$DSN" -v ON_ERROR_STOP=1 -X -tA -f "$tmp" >/dev/null || fail "$name seed failed"
   rm -f "$tmp"
   log "$name applied"
 }

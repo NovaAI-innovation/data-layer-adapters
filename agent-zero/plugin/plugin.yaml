@@ -1,0 +1,9 @@
+name: data_management
+title: Data Management
+description: Execute SQL against a configurable Postgres database. Default mode is read-only; write operations require explicit force flag. Designed for the persistence-mcp-sprint dry-runs and migrations.
+version: 1.0.0
+settings_sections:
+  - agent
+per_project_config: false
+per_agent_config: false
+always_enabled: true

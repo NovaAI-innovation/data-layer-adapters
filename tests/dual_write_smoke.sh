@@ -40,6 +40,37 @@ fail() { printf '[dual_write_smoke FAIL] %s\n' "$*" >&2; exit 1; }
 log "session_id=$SESSION_ID run_ts=$RUN_TS"
 
 # ──────────────────────────────────────────────────────────────────────
+# Step 0: Fixture — session_heartbeats.session_id FKs to sessions(id),
+# and sessions.agent_id FKs to agents(id). Pick any existing agent
+# (adapter seeds provide one) and create the session row.
+# ──────────────────────────────────────────────────────────────────────
+log "step 0: creating session fixture"
+AGENT_ID="$(DATA_LAYER_POSTGRES_DSN="$DSN" python3 - <<PY
+import os, psycopg
+with psycopg.connect(os.environ["DATA_LAYER_POSTGRES_DSN"]) as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM agents ORDER BY created_at LIMIT 1")
+        row = cur.fetchone()
+        print(row[0] if row else "")
+PY
+)"
+if [[ -z "$AGENT_ID" ]]; then
+    fail "no rows in agents; run adapter seeds before the smoke test"
+fi
+DATA_LAYER_POSTGRES_DSN="$DSN" python3 - <<PY
+import os, psycopg
+with psycopg.connect(os.environ["DATA_LAYER_POSTGRES_DSN"]) as conn:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO sessions (id, agent_id, session_key, metadata) "
+            "VALUES (%s, %s, %s, '{\"test\": true}'::jsonb)",
+            ("$SESSION_ID", "$AGENT_ID", "dual-write-smoke:$SESSION_ID"),
+        )
+    conn.commit()
+PY
+log "session fixture created (agent_id=$AGENT_ID)"
+
+# ──────────────────────────────────────────────────────────────────────
 # Step 1: Drive the dual-write through the framework-agnostic core.
 # ──────────────────────────────────────────────────────────────────────
 log "step 1: invoking WriteThrough.session_heartbeat_record"
@@ -59,7 +90,7 @@ from write_through import WriteThrough, session_heartbeat_record, get_counters
 record = session_heartbeat_record(
     session_id="$SESSION_ID",
     ts_iso="$RUN_TS",
-    source="dual_write_smoke",
+    source="adapter",  # canonical values only: adapter|replay|import (0004 CHECK)
     metadata={"test": True},
 )
 summary = WriteThrough.from_env().write(record)

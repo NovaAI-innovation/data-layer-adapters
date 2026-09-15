@@ -1,0 +1,33 @@
+# Default configuration for the data_management plugin.
+#
+# Edit these values via Settings → Agent → Data Management, or by
+# directly writing the project's `config.json`.
+#
+# Required: dsn
+# Recommended: pool_min, pool_max, statement_timeout_ms
+
+# PostgreSQL DSN. Format: postgresql://user:password@host:port/dbname
+# For the persistence-mcp-sprint sbzm instance, ask the operator for
+# the connection string (the MCP server on hermes exposes this).
+dsn: ""
+
+# Pool sizing
+pool_min: 1
+pool_max: 5
+
+# Per-statement timeout. Kills long-running queries.
+statement_timeout_ms: 30000
+
+# Read-only by default. Tools pass readonly=false to opt into writes.
+readonly_default: true
+
+# Operations that require an explicit force=true flag even with
+# readonly=false. Matched against the leading verb of the SQL after
+# leading whitespace and comments are stripped.
+require_force_for:
+  - DROP
+  - TRUNCATE
+  - ALTER
+
+# Limit result-set size for SELECTs (rows returned before truncation).
+select_row_limit: 1000

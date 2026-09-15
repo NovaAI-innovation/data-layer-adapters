@@ -69,6 +69,7 @@ class FalkorRESP:
         self.port = port
         self.timeout = timeout
         self._sock: socket.socket | None = None
+        self._buf = b""
 
     def connect(self) -> None:
         if self._sock is not None:
@@ -76,6 +77,7 @@ class FalkorRESP:
         s = socket.create_connection((self.host, self.port), timeout=self.timeout)
         s.settimeout(self.timeout)
         self._sock = s
+        self._buf = b""
 
     def close(self) -> None:
         if self._sock is not None:
@@ -93,24 +95,27 @@ class FalkorRESP:
             buf.append(f"${len(s)}\r\n{s}\r\n")
         self._sock.sendall("".join(buf).encode("utf-8"))
 
-    def _read_line(self) -> bytes:
+    def _fill_buf(self) -> None:
+        """Read more bytes from the socket into the receive buffer."""
         assert self._sock is not None, "not connected"
-        out = b""
-        while not out.endswith(b"\r\n"):
-            chunk = self._sock.recv(4096)
-            if not chunk:
-                raise ConnectionError("falkordb closed connection")
-            out += chunk
-        return out[:-2]
+        chunk = self._sock.recv(4096)
+        if not chunk:
+            raise ConnectionError("falkordb closed connection")
+        self._buf += chunk
+
+    def _read_line(self) -> bytes:
+        """Read exactly one CRLF-terminated line, leaving any bytes that
+        arrived in the same TCP segment buffered for subsequent reads."""
+        while b"\r\n" not in self._buf:
+            self._fill_buf()
+        line, _, self._buf = self._buf.partition(b"\r\n")
+        return line
 
     def _read_n(self, n: int) -> bytes:
-        assert self._sock is not None, "not connected"
-        out = b""
-        while len(out) < n:
-            chunk = self._sock.recv(n - len(out))
-            if not chunk:
-                raise ConnectionError("falkordb closed connection")
-            out += chunk
+        """Read exactly n payload bytes, then consume the trailing CRLF."""
+        while len(self._buf) < n + 2:
+            self._fill_buf()
+        out, self._buf = self._buf[:n], self._buf[n + 2:]
         return out
 
     def _read_reply(self) -> object:
@@ -139,16 +144,27 @@ class FalkorRESP:
         return self._read_reply()
 
     def graph_query(self, graph: str, query: str, params: dict | None = None) -> object:
-        """Send one Cypher statement. Splits multi-statement queries."""
-        statements = [s.strip() for s in query.split(";") if s.strip()]
-        last_reply: object = None
-        for stmt in statements:
-            if params:
-                self._send("GRAPH.QUERY", graph, stmt, *[json.dumps(v) for v in params.values()])
-            else:
-                self._send("GRAPH.QUERY", graph, stmt)
-            last_reply = self._read_reply()
-        return last_reply
+        """Send ONE Cypher query as a single GRAPH.QUERY.
+
+        FalkorDB executes one query per GRAPH.QUERY call and rejects
+        multi-statement payloads, so callers wanting several statements
+        must issue several calls with complete, standalone queries.
+        Clause lists (e.g. MERGE ... SET ...) must be concatenated by
+        the caller into one query — clause variables stay bound only
+        within a single query.
+
+        FalkorDB binds parameters via a `CYPHER k1=v1 k2=v2` prefix on
+        the query string (values JSON-encoded), not via trailing RESP
+        arguments. Positional trailing args raise `Missing parameters`.
+        """
+        prefix = ""
+        if params:
+            prefix = "CYPHER " + " ".join(
+                f"{k}={json.dumps(v)}" for k, v in params.items()
+            )
+        payload = f"{prefix} {query}" if prefix else query
+        self._send("GRAPH.QUERY", graph, payload)
+        return self._read_reply()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -258,9 +274,11 @@ class RedisPublishHook:
             return
 
         log.debug("project %s event=%s", projection, event_id)
-        # Concatenate statements into one logical query; the client
-        # splits on `;` for the wire protocol.
-        joined = ";\n".join(cypher_list)
+        # The cypher list holds CLAUSES of a single query (e.g. MERGE
+        # ... SET ...). Clause variables only stay bound within one
+        # query, so concatenate into one GRAPH.QUERY payload — never
+        # split on `;` (a lone SET would reference an unbound variable).
+        joined = " ".join(cypher_list)
         try:
             self._falkor.graph_query(self.graph, joined, params)
         except Exception as e:
