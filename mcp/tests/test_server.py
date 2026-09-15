@@ -1,15 +1,19 @@
 """Smoke tests for the universal data-layer MCP server.
 
-Three test classes:
+Three test classes plus a RAG-aware suite:
 
-- SmokeTests: structural + dispatcher + protocol tests. No DB.
-              Always runs.
+- SmokeTests: structural + dispatcher + protocol tests. No DB, no Qdrant.
+              Always runs. Covers BOTH the 14 Postgres-backed tools
+              and the 7 Qdrant-backed RAG tools.
+- RagSmokeTests: structural tests for the RAG layer that talk to
+              the live Qdrant if DATA_LAYER_QDRANT_URL is reachable.
+              Skip cleanly otherwise.
 - DbTests:   end-to-end against a real Postgres. Gated by
               DATA_LAYER_TEST_DSN (or DATA_LAYER_POSTGRES_DSN).
               Skipped if DSN unset or DB unreachable.
 - SubprocessSmokeTests: spawns the server as a subprocess to verify
-                        the JSON-RPC wire protocol.
-                        Gated by the same DSN env vars.
+              the JSON-RPC wire protocol.
+              Gated by the same DSN env vars.
 
 Run from data-layer-adapters/:
 
@@ -31,42 +35,64 @@ sys.path.insert(0, str(MCP_ROOT))
 
 
 class SmokeTests(unittest.TestCase):
-    """Structural + protocol tests. No DB required."""
+    """Structural + protocol tests. No DB or Qdrant required."""
 
     @classmethod
     def setUpClass(cls):
-        from tools import retrieval, safety, _registry  # noqa: F401
+        from tools import retrieval, safety, _registry, rag  # noqa: F401
         cls.retrieval = retrieval
         cls.safety = safety
+        cls.rag = rag
 
-    def test_registry_has_exactly_14_tools(self):
-        """Governance: exactly 14 read-only tools, zero write tools."""
+    def test_postgres_registry_has_exactly_14_tools(self):
+        """Governance: 14 Postgres-backed read-only tools."""
         names = sorted(self.retrieval.TOOL_REGISTRY.keys())
         self.assertEqual(
             len(names), 14,
-            "TOOL_REGISTRY must have 14 tools; got: " + str(names),
+            "retrieval.TOOL_REGISTRY must have 14 tools; got: " + str(names),
         )
 
-    def test_descriptors_match_registry(self):
+    def test_rag_registry_has_exactly_7_tools(self):
+        """Governance: 7 Qdrant-backed RAG tools (5 read + 2 gated write)."""
+        names = sorted(self.rag.TOOL_REGISTRY_RAG.keys())
+        self.assertEqual(
+            len(names), 7,
+            "rag.TOOL_REGISTRY_RAG must have 7 tools; got: " + str(names),
+        )
+
+    def test_postgres_descriptors_match_registry(self):
         from server import TOOL_DESCRIPTORS
         reg_names = set(self.retrieval.TOOL_REGISTRY.keys())
         desc_names = {d["name"] for d in TOOL_DESCRIPTORS}
         missing = reg_names - desc_names
         extra = desc_names - reg_names
-        self.assertFalse(missing, "descriptors missing: " + str(missing))
-        self.assertFalse(extra, "descriptors extra: " + str(extra))
+        self.assertFalse(missing, "postgres descriptors missing: " + str(missing))
+        self.assertFalse(extra, "postgres descriptors extra: " + str(extra))
+
+    def test_rag_descriptors_match_registry(self):
+        from server import TOOL_DESCRIPTORS_RAG
+        reg_names = set(self.rag.TOOL_REGISTRY_RAG.keys())
+        desc_names = {d["name"] for d in TOOL_DESCRIPTORS_RAG}
+        missing = reg_names - desc_names
+        extra = desc_names - reg_names
+        self.assertFalse(missing, "rag descriptors missing: " + str(missing))
+        self.assertFalse(extra, "rag descriptors extra: " + str(extra))
 
     def test_all_descriptors_have_schema(self):
-        from server import TOOL_DESCRIPTORS
-        for d in TOOL_DESCRIPTORS:
+        from server import TOOL_DESCRIPTORS, TOOL_DESCRIPTORS_RAG
+        for d in list(TOOL_DESCRIPTORS) + list(TOOL_DESCRIPTORS_RAG):
             self.assertIn("name", d)
             self.assertIn("description", d)
             self.assertIn("inputSchema", d)
             self.assertEqual(d["inputSchema"]["type"], "object")
             self.assertIn("properties", d["inputSchema"])
 
-    def test_no_write_tools_in_descriptors(self):
-        """Governance: zero write tools exposed."""
+    def test_no_unbounded_write_tools_in_postgres_descriptors(self):
+        """Governance: zero unconditional write tools on the postgres side.
+
+        rag.ingest.* are allowed because they are explicitly gated by
+        ``MCP_INSTALL_MODE`` (see test_rag_ingest_gated_off_by_default).
+        """
         from server import TOOL_DESCRIPTORS
         names = [d["name"] for d in TOOL_DESCRIPTORS]
         forbidden = (
@@ -80,6 +106,24 @@ class SmokeTests(unittest.TestCase):
         )
         for bad in forbidden:
             self.assertNotIn(bad, names, "forbidden write tool present: " + bad)
+
+    def test_rag_ingest_tools_are_marked_gated_in_descriptors(self):
+        """rag.ingest.* descriptors MUST mention the install-mode gate."""
+        from server import TOOL_DESCRIPTORS_RAG
+        ingest = [d for d in TOOL_DESCRIPTORS_RAG if d["name"].startswith("rag.ingest.")]
+        # Only rag.ingest.point and rag.ingest.batch are gated writes;
+        # rag.ingest.status is a read.
+        gated_writes = {"rag.ingest.point", "rag.ingest.batch"}
+        for d in ingest:
+            if d["name"] in gated_writes:
+                self.assertIn(
+                    "GATED", d["description"].upper(),
+                    d["name"] + " descriptor must say it is GATED",
+                )
+                self.assertIn(
+                    "MCP_INSTALL_MODE", d["description"],
+                    d["name"] + " descriptor must mention MCP_INSTALL_MODE gate env var",
+                )
 
     def test_per_framework_descriptors_empty(self):
         """Legacy heartbeat wrappers removed; registry empty until a future tool is added."""
@@ -136,19 +180,87 @@ class SmokeTests(unittest.TestCase):
         self.assertIsNotNone(self.safety.assert_select_only("   "))
         self.assertIsNotNone(self.safety.assert_select_only("-- just a comment"))
 
+    def test_safety_install_mode_gate_closed_by_default(self):
+        """With MCP_INSTALL_MODE unset, the gate refuses rag.ingest.* calls."""
+        saved = os.environ.pop("MCP_INSTALL_MODE", None)
+        try:
+            err = self.safety.assert_install_mode()
+            self.assertIsNotNone(err, "gate must refuse when env unset")
+            self.assertIn("install mode is OFF", err["error"]["message"])
+        finally:
+            if saved is not None:
+                os.environ["MCP_INSTALL_MODE"] = saved
+
+    def test_safety_install_mode_gate_open_when_set(self):
+        """With MCP_INSTALL_MODE=1, the gate accepts rag.ingest.* calls."""
+        saved = os.environ.get("MCP_INSTALL_MODE")
+        os.environ["MCP_INSTALL_MODE"] = "1"
+        try:
+            self.assertIsNone(self.safety.assert_install_mode())
+        finally:
+            if saved is not None:
+                os.environ["MCP_INSTALL_MODE"] = saved
+            else:
+                os.environ.pop("MCP_INSTALL_MODE", None)
+
+    def test_safety_sot_invariant_refuses_do_not_ingest(self):
+        """SOT invariant refuses payloads with do_not_ingest_y_n='Y'."""
+        payload = {"do_not_ingest_y_n": "Y", "body": "x"}
+        err = self.safety.assert_sot_invariant(payload)
+        self.assertIsNotNone(err)
+        self.assertIn("do_not_ingest_y_n", err["error"]["message"])
+
+    def test_safety_sot_invariant_refuses_untagged_superseded(self):
+        """SOT invariant refuses superseded rows that lack lifecycle_status tag."""
+        payload = {"superseded_y_n": "Y", "body": "x"}
+        err = self.safety.assert_sot_invariant(payload)
+        self.assertIsNotNone(err)
+        self.assertIn("superseded", err["error"]["message"])
+
+    def test_safety_sot_invariant_accepts_tagged_superseded(self):
+        """SOT invariant accepts superseded rows that are properly tagged."""
+        payload = {"superseded_y_n": "Y", "lifecycle_status": "superseded", "body": "x"}
+        self.assertIsNone(self.safety.assert_sot_invariant(payload))
+
+    def test_safety_sot_invariant_accepts_clean_payload(self):
+        """SOT invariant accepts payloads with no SOT flags set."""
+        payload = {"body": "x", "do_not_ingest_y_n": "N", "superseded_y_n": "N"}
+        self.assertIsNone(self.safety.assert_sot_invariant(payload))
+
+    def test_safety_sot_invariant_rejects_non_dict(self):
+        for bad in (None, "string", 42, ["list"]):
+            with self.subTest(payload=bad):
+                err = self.safety.assert_sot_invariant(bad)
+                self.assertIsNotNone(err)
+
     def test_initialize_method(self):
         from server import handle_request
         resp = handle_request({"method": "initialize", "id": 1})
         self.assertIn("result", resp)
         self.assertEqual(resp["result"]["protocolVersion"], "2024-11-05")
         self.assertEqual(resp["result"]["serverInfo"]["name"], "data-layer")
+        # Description must mention both 14 Postgres tools AND 7 RAG tools.
+        desc = resp["result"]["serverInfo"]["description"]
+        self.assertIn("21", desc, "initialize description must advertise 21 tools")
+        self.assertIn("Qdrant", desc, "initialize description must mention Qdrant")
 
-    def test_tools_list_method_returns_14(self):
+    def test_tools_list_method_returns_21(self):
+        """Governance: tools/list returns exactly 21 descriptors (14 PG + 7 RAG)."""
         from server import handle_request
         resp = handle_request({"method": "tools/list", "id": 2})
         self.assertIn("result", resp)
         names = [t["name"] for t in resp["result"]["tools"]]
-        self.assertEqual(len(names), 14, "got: " + str(names))
+        self.assertEqual(len(names), 21, "got: " + str(names))
+        # Spot-check both groups are present.
+        for expected in (
+            "health.check",
+            "execute_sql",
+            "rag.health",
+            "rag.search",
+            "rag.ingest.point",
+            "rag.ingest.batch",
+        ):
+            self.assertIn(expected, names, "missing tool: " + expected)
 
     def test_unknown_method_returns_error(self):
         from server import handle_request
@@ -182,6 +294,152 @@ class SmokeTests(unittest.TestCase):
                     "refused", resp["error"]["message"].lower(),
                     bad,
                 )
+
+    def test_rag_ingest_point_gated_off_by_default(self):
+        """rag.ingest.point refuses when MCP_INSTALL_MODE is unset."""
+        saved = os.environ.pop("MCP_INSTALL_MODE", None)
+        try:
+            from server import handle_request
+            resp = handle_request({
+                "method": "tools/call",
+                "params": {
+                    "name": "rag.ingest.point",
+                    "arguments": {
+                        "collection": "mpg_source_authority_documents",
+                        "id": "x",
+                        "vector": [0.0] * 768,
+                        "payload": {"body": "x"},
+                    },
+                },
+                "id": 6,
+            })
+            self.assertIn("error", resp)
+            self.assertIn("install mode is OFF", resp["error"]["message"])
+        finally:
+            if saved is not None:
+                os.environ["MCP_INSTALL_MODE"] = saved
+
+    def test_rag_ingest_batch_gated_off_by_default(self):
+        """rag.ingest.batch refuses when MCP_INSTALL_MODE is unset."""
+        saved = os.environ.pop("MCP_INSTALL_MODE", None)
+        try:
+            from server import handle_request
+            resp = handle_request({
+                "method": "tools/call",
+                "params": {
+                    "name": "rag.ingest.batch",
+                    "arguments": {
+                        "collection": "mpg_source_authority_documents",
+                        "csv_path": "/nonexistent",
+                    },
+                },
+                "id": 7,
+            })
+            self.assertIn("error", resp)
+            self.assertIn("install mode is OFF", resp["error"]["message"])
+        finally:
+            if saved is not None:
+                os.environ["MCP_INSTALL_MODE"] = saved
+
+    def test_rag_search_collection_allowlist_rejects_unknown(self):
+        """rag.search refuses collection names outside the allowlist."""
+        from server import handle_request
+        resp = handle_request({
+            "method": "tools/call",
+            "params": {
+                "name": "rag.search",
+                "arguments": {
+                    "collection": "some_random_collection",
+                    "vector": [0.0] * 768,
+                },
+            },
+            "id": 8,
+        })
+        self.assertIn("error", resp)
+        self.assertIn("allowlist", resp["error"]["message"])
+
+    def test_rag_collection_info_allowlist_rejects_unknown(self):
+        """rag.collection.info refuses collection names outside the allowlist."""
+        from server import handle_request
+        resp = handle_request({
+            "method": "tools/call",
+            "params": {
+                "name": "rag.collection.info",
+                "arguments": {"collection": "some_random_collection"},
+            },
+            "id": 9,
+        })
+        self.assertIn("error", resp)
+        self.assertIn("allowlist", resp["error"]["message"])
+
+
+class RagSmokeTests(unittest.TestCase):
+    """Structural + functional RAG tests that talk to the live Qdrant.
+
+    Gated by DATA_LAYER_QDRANT_URL (default http://localhost:6333).
+    Skip cleanly if Qdrant is unreachable.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.url = os.environ.get(
+            "DATA_LAYER_QDRANT_URL", "http://localhost:6333"
+        ).rstrip("/")
+        try:
+            import requests
+            r = requests.get(cls.url + "/healthz", timeout=3)
+            if r.status_code != 200:
+                raise RuntimeError(
+                    "qdrant returned " + str(r.status_code) + " at " + cls.url
+                )
+        except Exception as e:
+            raise unittest.SkipTest(
+                "Qdrant unreachable at " + cls.url + ": " + str(e)
+            )
+
+    def test_rag_health_ok(self):
+        from server import handle_request
+        resp = handle_request({
+            "method": "tools/call",
+            "params": {"name": "rag.health", "arguments": {}},
+            "id": 1,
+        })
+        self.assertIn("result", resp, repr(resp))
+        self.assertTrue(resp["result"]["ok"])
+
+    def test_rag_collections_list_returns_list(self):
+        from server import handle_request
+        resp = handle_request({
+            "method": "tools/call",
+            "params": {"name": "rag.collections.list", "arguments": {}},
+            "id": 1,
+        })
+        self.assertIn("result", resp, repr(resp))
+        self.assertIn("collections", resp["result"])
+
+    def test_rag_collection_info_on_allowlisted_collection(self):
+        from server import handle_request
+        resp = handle_request({
+            "method": "tools/call",
+            "params": {
+                "name": "rag.collection.info",
+                "arguments": {"collection": "mpg_source_authority_documents"},
+            },
+            "id": 1,
+        })
+        # Two outcomes are acceptable: the collection exists (result
+        # with config) OR the migration has not run yet (error 404).
+        # What must NOT happen is an allowlist refusal or a transport
+        # error.
+        self.assertTrue(
+            "result" in resp or "error" in resp,
+            "no result and no error: " + repr(resp),
+        )
+        if "error" in resp:
+            # If there is an error, it must be the qdrant "not found" one,
+            # not an allowlist refusal or a transport error.
+            self.assertNotIn("allowlist", resp["error"]["message"])
+            self.assertNotIn("unreachable", resp["error"]["message"])
 
 
 class DbTests(unittest.TestCase):
@@ -335,7 +593,7 @@ class SubprocessSmokeTests(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[0]["result"]["protocolVersion"], "2024-11-05")
         tools = lines[1]["result"]["tools"]
-        self.assertEqual(len(tools), 14)
+        self.assertEqual(len(tools), 21)
 
 
 if __name__ == "__main__":

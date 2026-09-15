@@ -25,6 +25,7 @@ deprecated once this MCP is verified.
 from __future__ import annotations
 
 import datetime
+import os
 import re
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -160,3 +161,104 @@ def row_limit_cap(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]
     if limit <= 0 or len(rows) <= limit:
         return rows
     return rows[:limit]
+
+
+# ── install-mode gate (rag.ingest.* only) ────────────────────────────
+# The RAG ingest tools (rag.ingest.point, rag.ingest.batch) are the
+# ONLY write tools this MCP exposes. They are gated by the env var
+# ``MCP_INSTALL_MODE=1`` so that:
+#
+#   * Production MCP runs (started by Agent Zero or Hermes as a read-only
+#     retrieval surface) refuse writes by default — even if a malicious
+#     caller asks the LLM to "just embed this one document".
+#   * Bootstrap-driven ingest runs (started by
+#     ``bash data-layer-qdrant/bootstrap seed`` or a one-off operator
+#     command) explicitly opt in by exporting ``MCP_INSTALL_MODE=1``
+#     before spawning the MCP.
+#
+# This gate is the operational equivalent of the postgres ``execute_sql``
+# SELECT-only gate: structural refusal before the cursor is opened.
+# A return value of None means the gate is open; a dict with ``error``
+# means the gate refused the call.
+
+
+def assert_install_mode(env_var: str = "MCP_INSTALL_MODE") -> Optional[Dict[str, Any]]:
+    """Return None if install mode is enabled, else an error dict.
+
+    Reads ``env_var`` from the process environment. The canonical value
+    is the string ``"1"`` (any truthy value would also work, but ``1``
+    is what every bootstrap script in this repo uses).
+
+    This is a structural check (env lookup), not a configuration-file
+    check, so it cannot be bypassed by writing to a config file the
+    agent might be able to mutate.
+    """
+    val = os.environ.get(env_var, "")
+    if val == "1":
+        return None
+    return _err(
+        "install mode is OFF (" + env_var + "='" + val + "'). "
+        "rag.ingest.* tools are gated to bootstrap scripts only. "
+        "Set " + env_var + "=1 in the environment that spawns the MCP, "
+        "then restart. The MCP is read-only by governance; install/seed "
+        "must be a documented, operator-driven bootstrap step."
+    )
+
+
+# ── SOT-invariant gate (rag.ingest.* only) ───────────────────────────
+# The Source-of-Truth invariant for the qdrant layer is:
+#
+#   * do_not_ingest_y_n == 'Y'  → NEVER ingest (must be excluded from
+#     every search and never written to qdrant).
+#   * superseded_y_n == 'Y'      → MUST be marked lifecycle_status='superseded'
+#     and tagged in payload; the seed script also filters them out of
+#     the active index.
+#
+# Both checks are structural (text-level) on the payload dict; the
+# caller passes the payload it intends to write. The gate returns None
+# if the payload is safe to ingest, else an error dict.
+
+
+def assert_sot_invariant(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return None if the payload respects the qdrant SOT invariant.
+
+    The invariant is two-part:
+
+      1. ``do_not_ingest_y_n`` MUST NOT be 'Y'. The source-authority
+         controlled fixture uses this flag to mark rows that must stay
+         out of the semantic index even if they appear in the corpus
+         (e.g. draft contract templates, PII redacted, internal-only).
+
+      2. ``superseded_y_n`` MAY be 'Y', but if so the payload MUST
+         include ``lifecycle_status == 'superseded'`` so downstream
+         search filters can match it. (We don't refuse superseded
+         rows; we require them to be tagged so they are auditable.)
+
+    The check accepts a dict (the proposed payload) or None (treated
+    as missing data — refused).
+    """
+    if not isinstance(payload, dict):
+        return _err(
+            "SOT invariant: payload must be a dict, got "
+            + type(payload).__name__
+        )
+
+    if str(payload.get("do_not_ingest_y_n", "")).upper() == "Y":
+        return _err(
+            "SOT invariant: refused to ingest row with "
+            "do_not_ingest_y_n='Y'. Such rows must be excluded from the "
+            "semantic index even if they appear in the source corpus."
+        )
+
+    if str(payload.get("superseded_y_n", "")).upper() == "Y":
+        if str(payload.get("lifecycle_status", "")).lower() != "superseded":
+            return _err(
+                "SOT invariant: row has superseded_y_n='Y' but "
+                "lifecycle_status is missing or not 'superseded'. "
+                "Superseded rows must be tagged with "
+                "lifecycle_status='superseded' so search filters can "
+                "exclude them. (We do not refuse superseded rows — we "
+                "require them to be tagged.)"
+            )
+
+    return None

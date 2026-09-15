@@ -30,6 +30,7 @@ if _HERE not in sys.path:
 
 from tools.retrieval import TOOL_REGISTRY  # noqa: E402
 from tools._registry import FRAMEWORK_DESCRIPTORS  # noqa: E402
+from tools.rag import TOOL_DESCRIPTORS_RAG, TOOL_REGISTRY_RAG  # noqa: E402
 
 # Lazy DSN resolution: env var beats saved default. Production
 # deployments set DATA_LAYER_POSTGRES_DSN explicitly; dev defaults
@@ -251,18 +252,25 @@ def handle_request(req):
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "data-layer",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                     "description": (
                         "Framework-agnostic retrieval MCP for the Agent Zero "
-                        "data-layer. Read-only; zero write tools. Writes happen "
-                        "via the governed bootstrap scripts."
+                        "data-layer. 21 read-only tools (14 Postgres-backed + 7 "
+                        "Qdrant-backed RAG). Zero write tools in normal operation; "
+                        "rag.ingest.* are gated by MCP_INSTALL_MODE=1 for "
+                        "bootstrap-only writes. All other writes happen via the "
+                        "governed bootstrap scripts."
                     ),
                 },
                 "capabilities": {"tools": {"listChanged": False}},
             }
         }
     if method == "tools/list":
-        merged = list(TOOL_DESCRIPTORS) + list(FRAMEWORK_DESCRIPTORS)
+        merged = (
+            list(TOOL_DESCRIPTORS)
+            + list(TOOL_DESCRIPTORS_RAG)
+            + list(FRAMEWORK_DESCRIPTORS)
+        )
         return {"result": {"tools": merged}}
     if method == "tools/call":
         params = req.get("params") or {}
@@ -271,6 +279,8 @@ def handle_request(req):
         if not name:
             return _rpc_error(-32602, "missing tool name")
         fn = TOOL_REGISTRY.get(name)
+        if fn is None:
+            fn = TOOL_REGISTRY_RAG.get(name)
         if fn is None:
             return _rpc_error(-32601, "unknown tool: " + repr(name))
         try:

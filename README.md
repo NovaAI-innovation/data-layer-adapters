@@ -21,10 +21,10 @@ data-layer-adapters/
 │   ├── bootstrap                # same shape as agent-zero
 │   ├── lib/, plugin/, prompts/, seeds/
 ├── mcp/                         # UNIVERSAL MCP server (read-only, framework-agnostic)
-│   ├── server.py                # JSON-RPC dispatcher + 14 tool descriptors
+│   ├── server.py                # JSON-RPC dispatcher + 21 tool descriptors
 │   ├── README.md                # tool catalogue + governance policy
-│   ├── tools/                   # retrieval, safety, _registry
-│   └── tests/                   # unit + integration smoke tests
+│   ├── tools/                   # retrieval (14 PG), rag (7 Qdrant), safety, _registry
+│   └── tests/                   # unit + integration smoke tests (31 tests)
 ```
 
 > **MVP framework set:** `agent-zero` and `hermes-agent` only. No
@@ -54,7 +54,7 @@ via the governed bootstrap scripts in `agent-zero/bootstrap` and
 SOT and is managed by a governed documentation system, not by the
 agent's judgement.
 
-The 14 read-only tools (see `mcp/README.md` for full catalogue):
+The 21 tools (see `mcp/README.md` for full catalogue):
 
 | Group | Tools |
 |---|---|
@@ -62,6 +62,16 @@ The 14 read-only tools (see `mcp/README.md` for full catalogue):
 | Single-row gets | `projects.get`, `agents.get`, `sessions.get`, `messages.get`, `tool_executions.get` |
 | Search & composite | `messages.search`, `history.retrieve` |
 | Raw SQL (SELECT-only) | `execute_sql` — refuses 17 write verbs at the Python layer before opening any cursor |
+| **RAG reads (Qdrant-backed)** | `rag.health`, `rag.collections.list`, `rag.collection.info`, `rag.search`, `rag.ingest.status` |
+| **RAG writes (gated)** | `rag.ingest.point`, `rag.ingest.batch` — refuse unless `MCP_INSTALL_MODE=1` is set in the env of the process that spawned the MCP |
+
+The two `rag.ingest.*` writes are the only writes the MCP ever exposes,
+and they are strictly gated to bootstrap-script use. All other writes
+to the data layer still happen via the `bootstrap` scripts under
+`agent-zero/` and `hermes-agent/`. The qdrant layer itself lives in
+the sibling submodule `../data-layer-qdrant/` (5th submodule of the
+umbrella); this MCP is the single agent-facing surface that talks to
+both Postgres and Qdrant.
 
 ### Removed (vs the prior 2-tool server)
 
@@ -81,5 +91,6 @@ cd data-layer-adapters
 python3 -m unittest mcp.tests.test_server -v
 ```
 
-12 structural + protocol tests run without a DB; 2 DB-gated tests
+25 structural + protocol tests + 3 RAG-against-live-Qdrant tests run
+without a DB; 2 DB-gated Postgres tests + 1 subprocess-handshake test
 skip cleanly when `DATA_LAYER_TEST_DSN` is unset or unreachable.

@@ -34,10 +34,13 @@ write tools from the MCP.
 If you genuinely need a write during install/seed, you do it via the
 bootstrap scripts, not via this MCP.
 
-## Tool catalogue — 14 read-only tools
+## Tool catalogue — 21 tools (14 Postgres-backed + 7 Qdrant-backed RAG)
 
-All 14 tools return JSON. None accept a flag that switches them into a
-write mode. The `execute_sql` tool is structurally restricted to
+All 21 tools return JSON. By default, every tool is read-only. The
+two `rag.ingest.*` tools are the only writes this MCP ever exposes,
+and they refuse unless the process environment carries
+`MCP_INSTALL_MODE=1` (the gate that bootstrap scripts opt into). The
+`execute_sql` tool is structurally restricted to
 SELECT/WITH/VALUES/EXPLAIN/SHOW at the Python level before the cursor
 is opened (see `tools/safety.py`).
 
@@ -58,6 +61,23 @@ is opened (see `tools/safety.py`).
 | `history.retrieve`          | `messages` ∪ `tool_executions`   | composite free-text + filters; ranked, cross-table |
 | `execute_sql`               | any (read-only)                  | **strictly SELECT-only** — refuses 17 write verbs before opening the cursor |
 
+### RAG tools (Qdrant-backed) — 7 tools
+
+The Qdrant layer is the semantic index that sits on top of postgres.
+Five tools are always-on reads; two are gated writes. Read tool names
+start with `rag.` and follow the same JSON-RPC + inputSchema contract
+as the postgres tools.
+
+| Tool                        | Backend                          | Gated? | Notes |
+|-----------------------------|----------------------------------|--------|-------|
+| `rag.health`                | `GET /healthz`                   | no     | liveness probe; returns `ok: true` if qdrant is reachable |
+| `rag.collections.list`      | `GET /collections`               | no     | list all collections |
+| `rag.collection.info`       | `GET /collections/{name}`        | no     | schema + point count; collection must be in the allowlist (`mpg_source_authority_documents`, `mpg_emails`) |
+| `rag.search`                | `POST /collections/{name}/points/search` | no | vector similarity; **always excludes** `do_not_ingest_y_n='Y'` and `lifecycle_status='superseded'` (read-side SOT enforcement) |
+| `rag.ingest.status`         | JSON marker file                 | no     | reads `/opt/qdrant/state/last_ingest.json` (or `DATA_LAYER_QDRANT_INGEST_MARKER`) |
+| `rag.ingest.point`          | `PUT /collections/{name}/points` | **YES**| refuses unless `MCP_INSTALL_MODE=1`; payload must satisfy SOT invariant |
+| `rag.ingest.batch`          | `PUT /collections/{name}/points` | **YES**| batch upsert from CSV; per-row SOT check, violations skipped with summary |
+
 ### What `execute_sql` refuses
 
 At the Python level, before any DB connection, `execute_sql` rejects
@@ -74,13 +94,49 @@ Allowed leading verbs: `SELECT WITH VALUES EXPLAIN SHOW`.
 
 ## Configuration
 
-| Env var                     | Purpose                                          | Default                                  |
-|-----------------------------|--------------------------------------------------|------------------------------------------|
-| `DATA_LAYER_POSTGRES_DSN`   | psycopg DSN for the live schema                  | `postgresql://postgres@localhost:5432/postgres` (dev only) |
+| Env var                              | Purpose                                                                                    | Default                                  |
+|--------------------------------------|--------------------------------------------------------------------------------------------|------------------------------------------|
+| `DATA_LAYER_POSTGRES_DSN`            | psycopg DSN for the live postgres schema                                                   | `postgresql://postgres@localhost:5432/postgres` (dev only) |
+| `DATA_LAYER_QDRANT_URL`              | Base URL of the Qdrant HTTP REST API                                                        | `http://localhost:6333`                  |
+| `DATA_LAYER_QDRANT_INGEST_MARKER`    | Path to the JSON marker file the bootstrap writes after a successful seed run              | `/opt/qdrant/state/last_ingest.json`     |
+| `MCP_INSTALL_MODE`                   | Set to `1` to enable the gated `rag.ingest.*` write tools (bootstrap-only)                  | unset (gates closed)                     |
 
-Production deployments MUST set `DATA_LAYER_POSTGRES_DSN` explicitly.
-The default fallback exists for in-process tests against a local
-postgres and is not safe for multi-tenant usage.
+Production deployments MUST set `DATA_LAYER_POSTGRES_DSN` and
+`DATA_LAYER_QDRANT_URL` explicitly. The defaults exist for in-process
+tests against a local postgres + qdrant and are not safe for
+multi-tenant usage. `MCP_INSTALL_MODE` MUST remain unset in any MCP
+started by Agent Zero or Hermes — only the bootstrap scripts in
+`data-layer-qdrant/bootstrap` are allowed to flip it to `1`.
+
+### Governance — why `rag.ingest.*` are gated, not removed
+
+Per the data-layer architecture (postgres = immutable record, qdrant
+= derived semantic index, redis = ephemeral cache, falkordb = graph
+edges), the qdrant layer **does** need an ingestion path. But the
+path is governed:
+
+  * Reads (`rag.search`, `rag.collection.info`, etc.) are always on.
+  * Writes (`rag.ingest.point`, `rag.ingest.batch`) refuse unless
+    `MCP_INSTALL_MODE=1` is set in the environment of the process that
+    spawned the MCP.
+  * Even when the gate is open, every payload is checked against the
+    Source-of-Truth invariant:
+    * `do_not_ingest_y_n='Y'` → always refused (the controlled fixture
+      marks rows with this flag to keep them out of the semantic
+      index even when they appear in the corpus).
+    * `superseded_y_n='Y'` → accepted only when the payload also
+      carries `lifecycle_status='superseded'` so search filters can
+      exclude it.
+
+This mirrors the `execute_sql` SELECT-only gate: structural refusal
+before the cursor / network call opens. A free-rein write tool would
+let the agent invent qdrant writes that diverge from the documented
+schema migrations, so the gate is the operational equivalent of
+"zero write tools by governance, except this narrowly scoped
+bootstrap path".
+
+See `data-layer-qdrant/docs/decisions/0001-rag-sot-architecture.md`
+for the architecture decision record.
 
 ## Quick start
 

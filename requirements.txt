@@ -11,3 +11,6 @@ redis>=5.0,<7
 
 # For tests / future tooling (kept here to pin once)
 pyyaml>=6.0,<7
+
+# MCP rag.* tools — HTTP client for the Qdrant REST API
+requests>=2.31,<3
