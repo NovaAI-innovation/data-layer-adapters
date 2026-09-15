@@ -24,3 +24,11 @@ __pycache__/
 *.pkl
 embedding.json
 knowledge_import.json
+
+# === Recursive .a0proj gitignore ===
+# All .a0proj directories in this repo (and their contents) are
+# per-developer-agent runtime state managed by the Agent Zero framework.
+# The framework regenerates project.json, mcp_servers.json, variables.env,
+# and instructions/ on first load — none of it is source-controlled.
+**/.a0proj/
+**/.a0proj/**
