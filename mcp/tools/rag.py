@@ -244,26 +244,34 @@ def _tool_rag_search(args: Dict[str, Any], dsn: Optional[str]) -> Dict[str, Any]
 
     limit = _bounded_limit(args, default=10, hard_max=100)
 
-    # Always-on SOT filter. MUST/MUST_NOT are combined with the
-    # caller's optional filter via AND.
-    sot_must = [
-        {"key": "do_not_ingest_y_n", "match": {"value": "Y"}}
+    # Always-on SOT filters: refuse to return rows that the source
+    # corpus marked as "do not ingest" OR as superseded. These go in
+    # must_not because they fire unconditionally; the caller's
+    # optional filter is merged on top via AND semantics.
+    #
+    # Both clauses are non-overridable: the caller cannot disable
+    # them by passing a custom filter. They are the read-side
+    # enforcement of the source-authority SOT.
+    sot_must_not = [
+        {"key": "do_not_ingest_y_n", "match": {"value": "Y"}},
+        {"key": "lifecycle_status", "match": {"value": "superseded"}},
     ]
-    # Qdrant's filter language: {must: [...], must_not: [...]}
+    # Qdrant's filter language: {"must": [...], "must_not": [...]}
+    # Each list is ANDed; must and must_not together refine the
+    # candidate set. The caller may add extra clauses — we do NOT
+    # duplicate them.
     caller_filter = args.get("filter") or {}
     if not isinstance(caller_filter, dict):
         return _err("rag.search 'filter' must be a dict")
-
-    merged_must = (caller_filter.get("must") or []) + sot_must
-    merged_filter: Dict[str, Any] = {"must_not": sot_must, "must": caller_filter.get("must") or []}
-    # Exclude superseded AND do_not_ingest rows unconditionally:
-    # Use must_not with the same two clauses to be belt-and-suspenders.
+    if "must" in caller_filter and not isinstance(caller_filter["must"], list):
+        return _err("rag.search 'filter.must' must be a list of clauses")
+    if "must_not" in caller_filter and not isinstance(
+        caller_filter["must_not"], list
+    ):
+        return _err("rag.search 'filter.must_not' must be a list of clauses")
     merged_filter = {
-        "must": list(merged_must) + caller_filter.get("must", []),
-        "must_not": list(caller_filter.get("must_not", []) or []) + [
-            {"key": "do_not_ingest_y_n", "match": {"value": "Y"}},
-            {"key": "lifecycle_status", "match": {"value": "superseded"}},
-        ],
+        "must": list(caller_filter.get("must") or []),
+        "must_not": list(caller_filter.get("must_not") or []) + sot_must_not,
     }
 
     body = {
