@@ -2,6 +2,13 @@
 -- Seeds the Hermes agent row for the Nous Research Hermes framework
 -- family. Idempotent. Run AFTER data-layer-postgres schema has been
 -- installed.
+--
+-- The metadata blob previously carried runtime-addressing fields
+-- (host/address/mcp_service) for a separate az-retrieval-mcp sidecar
+-- that has been retired; the data-layer-adapters universal MCP server
+-- is now the only sanctioned MCP endpoint for the data-layer stack
+-- (see data-layer-adapters/docs/decisions/0001-dual-write-and-redis-publish-hook.md).
+-- Only framework-agnostic descriptive metadata belongs here.
 
 BEGIN;
 
@@ -18,10 +25,7 @@ SELECT p.id, f.id,
        'hermes',
        'active',
        jsonb_build_object(
-           'host',        'hermes.tailbcc871.ts.net',
-           'address',     '100.64.49.70:8091',
-           'mcp_service', 'az-retrieval-mcp',
-           'kanban',      true)
+           'kanban', true)
   FROM projects p, agent_frameworks f
  WHERE p.project_key = 'default'
    AND f.kind        = 'hermes'
