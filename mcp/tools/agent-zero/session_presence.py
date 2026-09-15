@@ -1,3 +1,23 @@
+# ============================================================
+# DEPRECATED 2026-09-15 — DO NOT USE
+# ============================================================
+# The session.heartbeat tool was removed from the universal MCP
+# because session.heartbeat is a runtime write tool, not an
+# install/setup/seed tool. The data layer is governed as a
+# Source of Truth (SOT) managed by a documented bootstrap
+# pipeline, not by the autonomy or judgement of the agent.
+#
+# Dual-write semantics (postgres + redis + falkordb projection)
+# continue to work via lib/write_through.py, invoked directly
+# by lib/redis_publish_hook.py on Postgres NOTIFY — NOT through
+# this MCP. There is no replacement adapter here; heartbeat
+# callers should not exist in the agent path at all.
+#
+# Removal of this file is scheduled as a follow-up ADR. Until
+# then, the descriptor it returns is NOT registered in
+# mcp/tools/_registry.py and the dispatcher ignores it.
+# ============================================================
+
 #!/usr/bin/env python3
 """data-layer-adapters/mcp/tools/agent-zero/session_presence.py
 

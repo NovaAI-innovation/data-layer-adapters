@@ -1,189 +1,318 @@
 #!/usr/bin/env python3
-"""data-layer-adapters/mcp/server.py — universal MCP server.
+"""data-layer-adapters/mcp/server.py — universal MCP server (read-only).
 
-Speaks the MCP protocol. Tools are framework-agnostic; tool routing
-is by tool name, not by framework. Per-framework tool variants live
-under mcp/tools/<framework>/ if needed, but the server itself is
-universal.
+Speaks the MCP protocol (2024-11-05). Exposes 14 read-only tools for
+the data-layer Postgres schema. Tools are framework-agnostic.
 
-Tools shipped:
-  - execute_sql         (raw SQL passthrough; kept for ops/debugging)
-  - session.heartbeat   (Phase 1 of the dual-write contract; exercises
-                        postgres + redis + publish-hook path. Per
-                        data-layer-adapters/docs/decisions/0001.)
+Governance: zero write tools. Writes to the DB happen via the
+governed bootstrap scripts (``bash agent-zero/bootstrap seed`` or
+``bash hermes-agent/bootstrap seed``) — not via this MCP. The agent
+has no autonomy over DB writes.
+
+This server replaces the prior 2-tool version (which exposed
+``execute_sql`` with unrestricted writes and ``session.heartbeat``).
+Both are removed: ``session.heartbeat`` is a runtime write not
+needed under the install-only-write governance; ``execute_sql`` is
+strengthened to strictly SELECT-only.
 """
 from __future__ import annotations
-import json, os, sys
 
-DSN = os.environ.get("DATA_LAYER_POSTGRES_DSN", "postgresql://postgres@localhost:5432/postgres")
+import json
+import os
+import sys
+from typing import Any, Dict, List
 
-# Lazy import path for the dual-write library. sys.path manipulation is
-# scoped to the main() entrypoint so `import server` for tests does
-# not pollute sys.path.
-_LIB_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "lib"))
+# Ensure sibling tools/ package is importable regardless of how this
+# file is invoked.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from tools.retrieval import TOOL_REGISTRY  # noqa: E402
+from tools._registry import FRAMEWORK_DESCRIPTORS  # noqa: E402
+
+# Lazy DSN resolution: env var beats saved default. Production
+# deployments set DATA_LAYER_POSTGRES_DSN explicitly; dev defaults
+# to localhost for in-process testing.
+DSN = os.environ.get(
+    "DATA_LAYER_POSTGRES_DSN",
+    "postgresql://postgres@localhost:5432/postgres",
+)
+
+# Tool descriptors for tools/list. The dispatcher merges these with
+# any per-framework descriptors from tools/_registry.py.
+TOOL_DESCRIPTORS: List[Dict[str, Any]] = [
+    {
+        "name": "health.check",
+        "description": (
+            "Probe DSN reachability and per-table existence + row counts. "
+            "No inputs."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "projects.list",
+        "description": "List projects, optionally filtered by status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["active", "archived"]},
+                "limit": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "projects.get",
+        "description": "Get one project by its business key (project_key).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"project_key": {"type": "string"}},
+            "required": ["project_key"],
+        },
+    },
+    {
+        "name": "agents.list",
+        "description": (
+            "List agents with optional filters (project_key, framework kind, status)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_key": {"type": "string"},
+                "framework":   {"type": "string"},
+                "status":      {"type": "string", "enum": ["active", "disabled", "archived"]},
+                "limit":       {"type": "integer", "minimum": 0, "maximum": 1000, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "agents.get",
+        "description": "Get one agent by id (uuid).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string", "format": "uuid"}},
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "sessions.list",
+        "description": (
+            "List sessions with optional filters (agent_id, status, since, until)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "format": "uuid"},
+                "status":   {"type": "string", "enum": ["active", "closed", "crashed"]},
+                "since":    {"type": "string", "format": "date-time"},
+                "until":    {"type": "string", "format": "date-time"},
+                "limit":    {"type": "integer", "minimum": 0, "maximum": 1000, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "sessions.get",
+        "description": "Get one session by id (uuid).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string", "format": "uuid"}},
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "messages.list",
+        "description": (
+            "List messages with optional filters (session_id, agent_id, role, "
+            "since, until). Content is truncated to 4000 chars."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "format": "uuid"},
+                "agent_id":   {"type": "string", "format": "uuid"},
+                "role":       {"type": "string", "enum": ["user", "assistant", "tool", "system"]},
+                "since":      {"type": "string", "format": "date-time"},
+                "until":      {"type": "string", "format": "date-time"},
+                "limit":      {"type": "integer", "minimum": 0, "maximum": 1000, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "messages.get",
+        "description": "Get one message by id (uuid). Full content returned.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string", "format": "uuid"}},
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "messages.search",
+        "description": (
+            "ILIKE search over messages.content with optional filters. "
+            "Returns ranked snippet rows."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q":          {"type": "string"},
+                "agent_id":   {"type": "string", "format": "uuid"},
+                "session_id": {"type": "string", "format": "uuid"},
+                "role":       {"type": "string", "enum": ["user", "assistant", "tool", "system"]},
+                "since":      {"type": "string", "format": "date-time"},
+                "until":      {"type": "string", "format": "date-time"},
+                "limit":      {"type": "integer", "minimum": 0, "maximum": 1000, "default": 50},
+            },
+            "required": ["q"],
+        },
+    },
+    {
+        "name": "tool_executions.list",
+        "description": (
+            "List tool_executions with optional filters (session_id, agent_id, "
+            "tool_name, status, since, until)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "format": "uuid"},
+                "agent_id":   {"type": "string", "format": "uuid"},
+                "tool_name":  {"type": "string"},
+                "status":     {"type": "string", "enum": ["pending", "success", "error", "blocked"]},
+                "since":      {"type": "string", "format": "date-time"},
+                "until":      {"type": "string", "format": "date-time"},
+                "limit":      {"type": "integer", "minimum": 0, "maximum": 1000, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "tool_executions.get",
+        "description": "Get one tool_execution by id (uuid). Full payload returned.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string", "format": "uuid"}},
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "history.retrieve",
+        "description": (
+            "Composite retrieval: free-text q across messages + tool_executions, "
+            "ranked by recency. The retrieval-MCP equivalent of a search engine "
+            "over the agent's history."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q":        {"type": "string"},
+                "agent_id": {"type": "string", "format": "uuid"},
+                "role":     {"type": "string", "enum": ["user", "assistant", "tool", "system"]},
+                "since":    {"type": "string", "format": "date-time"},
+                "until":    {"type": "string", "format": "date-time"},
+                "limit":    {"type": "integer", "minimum": 0, "maximum": 200, "default": 20},
+            },
+            "required": ["q"],
+        },
+    },
+    {
+        "name": "execute_sql",
+        "description": (
+            "Run a strictly SELECT-only SQL query against the data-layer. "
+            "Refuses INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/TRUNCATE/GRANT/"
+            "REVOKE/MERGE/CALL/... before opening the cursor. Writes are not "
+            "permitted by this MCP; use the governed bootstrap scripts "
+            "(bash <adapter>/bootstrap seed) for setup. The data-layer DB is "
+            "SOT managed by a governed documentation system, not by the "
+            "autonomy or judgement of the agent."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string"},
+                "statement_timeout_ms": {
+                    "type": "integer", "minimum": 1000, "maximum": 120000
+                },
+            },
+            "required": ["sql"],
+        },
+    },
+]
 
 
-def _ensure_lib_path() -> None:
-    if _LIB_DIR not in sys.path:
-        sys.path.insert(0, _LIB_DIR)
+def _rpc_error(code, message):
+    return {"error": {"code": code, "message": message}}
 
 
-def handle_request(req: dict) -> dict:
+def handle_request(req):
     method = req.get("method", "")
     if method == "initialize":
-        return {"result": {"protocolVersion": "2024-11-05",
-                           "serverInfo": {"name": "data-layer", "version": "0.1.0"}}}
-
+        return {
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {
+                    "name": "data-layer",
+                    "version": "0.2.0",
+                    "description": (
+                        "Framework-agnostic retrieval MCP for the Agent Zero "
+                        "data-layer. Read-only; zero write tools. Writes happen "
+                        "via the governed bootstrap scripts."
+                    ),
+                },
+                "capabilities": {"tools": {"listChanged": False}},
+            }
+        }
     if method == "tools/list":
-        return {"result": {"tools": [
-            {"name": "execute_sql",
-             "description": "Run a SQL statement against the postgres data-layer.",
-             "inputSchema": {"type": "object",
-                              "properties": {"sql": {"type": "string"}},
-                              "required": ["sql"]}},
-            {"name": "session.heartbeat",
-             "description": ("Record a session heartbeat. Writes the "
-                             "postgres session_heartbeats row (or uses "
-                             "record_session_heartbeat()), updates "
-                             "sessions.last_heartbeat_at, writes the "
-                             "redis cache key under the tenant prefix, "
-                             "and publishes a session.heartbeat event "
-                             "for the redis publish hook to project to "
-                             "falkordb."),
-             "inputSchema": {"type": "object",
-                              "properties": {
-                                  "session_id": {"type": "string"},
-                                  "source":     {"type": "string",
-                                                  "default": "adapter"},
-                                  "metadata":   {"type": "object"},
-                              },
-                              "required": ["session_id"]}},
-        ]}}
-
+        merged = list(TOOL_DESCRIPTORS) + list(FRAMEWORK_DESCRIPTORS)
+        return {"result": {"tools": merged}}
     if method == "tools/call":
-        params = req.get("params", {}) or {}
+        params = req.get("params") or {}
         name = params.get("name")
-        args = params.get("arguments", {}) or {}
-        if name == "execute_sql":
-            return _tool_execute_sql(args)
-        if name == "session.heartbeat":
-            return _tool_session_heartbeat(args)
-        return {"error": {"code": -32601, "message": f"unknown tool: {name}"}}
-
-    return {"error": {"code": -32601, "message": f"unknown method: {method}"}}
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Tool: execute_sql  (preserved verbatim from the original server)
-# ──────────────────────────────────────────────────────────────────────
-
-def _tool_execute_sql(args: dict) -> dict:
-    sql = args.get("sql", "")
-    try:
-        import psycopg
-        with psycopg.connect(DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                if cur.description:
-                    cols = [d.name for d in cur.description]
-                    rows = [list(r) for r in cur.fetchall()]
-                    return {"result": {"columns": cols, "rows": rows}}
-                return {"result": {"affected": cur.rowcount}}
-    except Exception as e:
-        return {"error": {"code": -32000, "message": str(e)}}
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Tool: session.heartbeat  (Phase 1 dual-write; see ADR docs/decisions/0001)
-# ──────────────────────────────────────────────────────────────────────
-
-def _tool_session_heartbeat(args: dict) -> dict:
-    session_id = args.get("session_id")
-    if not session_id:
-        return {"error": {"code": -32602,
-                          "message": "session_id is required"}}
-    source = args.get("source", "adapter")
-    metadata = args.get("metadata") or {}
-
-    _ensure_lib_path()
-    try:
-        # Path A: prefer the helper SQL function if available.
-        import psycopg
-        with psycopg.connect(DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT record_session_heartbeat(%s, %s, %s::jsonb)",
-                    (session_id, source, json.dumps(metadata)),
-                )
-                ts = cur.fetchone()[0]
-    except Exception as e:
-        # Fall back to a plain INSERT if the helper function does not
-        # exist yet (e.g., migration 0004 not yet applied).
-        if "function" not in str(e).lower() and "does not exist" not in str(e):
-            return {"error": {"code": -32000, "message": str(e)}}
+        args = params.get("arguments") or {}
+        if not name:
+            return _rpc_error(-32602, "missing tool name")
+        fn = TOOL_REGISTRY.get(name)
+        if fn is None:
+            return _rpc_error(-32601, "unknown tool: " + repr(name))
         try:
-            import psycopg
-            with psycopg.connect(DSN) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO session_heartbeats "
-                        "(session_id, source, metadata) VALUES (%s, %s, %s::jsonb)",
-                        (session_id, source, json.dumps(metadata)),
-                    )
-                    cur.execute(
-                        "UPDATE sessions SET last_heartbeat_at = now() WHERE id = %s",
-                        (session_id,),
-                    )
-                    ts = None
-        except Exception as e2:
-            return {"error": {"code": -32000, "message": str(e2)}}
-
-    # Best-effort: cache + publish. Failures here are non-fatal
-    # because the postgres primary is already committed.
-    cache_status = "skipped"
-    publish_status = "skipped"
-    try:
-        from write_through import WriteThrough, session_heartbeat_record
-        record = session_heartbeat_record(
-            session_id=session_id,
-            ts_iso=ts.isoformat() if ts else None,
-            source=source,
-            metadata=metadata,
-        )
-        if record["cache"]["value"].get("last_heartbeat_at") is None and ts:
-            record["cache"]["value"]["last_heartbeat_at"] = ts.isoformat()
-        summary = WriteThrough.from_env().write(record)
-        cache_status = "ok" if summary.get("path") == "dual" else "skipped"
-        publish_status = ("ok" if summary.get("projection") else "skipped")
-    except Exception as e:
-        # Don't break the tool call if the cache/publish sidecar is down.
-        cache_status = f"error: {e}"
-
-    return {"result": {
-        "session_id":     session_id,
-        "last_heartbeat_at": ts.isoformat() if ts else None,
-        "cache":          cache_status,
-        "publish":        publish_status,
-    }}
+            return fn(args, DSN)
+        except Exception as e:
+            return {
+                "error": {
+                    "code": -32000,
+                    "message": type(e).__name__ + ": " + str(e),
+                }
+            }
+    return _rpc_error(-32601, "unknown method: " + repr(method))
 
 
 def main():
-    _ensure_lib_path()
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
             req = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(
+                json.dumps(
+                    {"jsonrpc": "2.0", "error": {"code": -32700, "message": str(e)}}
+                ),
+                flush=True,
+            )
+            continue
+        try:
             resp = handle_request(req)
-            resp["jsonrpc"] = "2.0"
-            if "id" in req:
-                resp["id"] = req["id"]
-            print(json.dumps(resp), flush=True)
         except Exception as e:
-            print(json.dumps({"jsonrpc": "2.0",
-                              "error": {"code": -32700, "message": str(e)}}),
-                  flush=True)
+            resp = {
+                "error": {
+                    "code": -32603,
+                    "message": type(e).__name__ + ": " + str(e),
+                }
+            }
+        resp["jsonrpc"] = "2.0"
+        if "id" in req:
+            resp["id"] = req["id"]
+        print(json.dumps(resp), flush=True)
 
 
 if __name__ == "__main__":

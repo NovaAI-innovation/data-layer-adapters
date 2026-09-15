@@ -1,43 +1,100 @@
 #!/usr/bin/env bash
 # data-layer-adapters/bootstrap
 # Subcommands: install | verify | status | reset | seed | help
+#
+# Framework discovery: any subdirectory of this directory that contains
+# an executable `bootstrap` script is a framework adapter. To add a new
+# framework (e.g., `crewai`), create `crewai/bootstrap` and place its
+# seed SQL under `crewai/seeds/` — it will be picked up automatically.
+#
+# Non-framework directories (mcp/, lib/, plugin/, prompts/, tests/)
+# are excluded from framework iteration.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
 usage() {
   cat <<USAGE
 Usage: $0 <subcommand> [args]
 
 Subcommands:
-  agent-zero    delegate to data-layer-adapters/agent-zero/bootstrap
-  hermes-agent  delegate to data-layer-adapters/hermes-agent/bootstrap
-  mcp           install the universal MCP server (data-layer-adapters/mcp)
-  all           run install for every framework adapter
-  seed          run seed for every framework adapter
-  verify|status reset
-  help          show this message
+  <framework>   delegate to <framework>/bootstrap (e.g. agent-zero, hermes-agent)
+  mcp          install the universal MCP server (data-layer-adapters/mcp)
+  all          run install for every discovered framework adapter
+  seed         run seed for every discovered framework adapter
+  verify       run verify for every discovered framework adapter
+  status       run status for every discovered framework adapter
+  reset        reset is a no-op for the adapter collection
+  help         show this message
+
+Framework adapters are auto-discovered: any subdirectory with an
+executable 'bootstrap' script is treated as a framework. Non-framework
+directories (mcp/, lib/, plugin/, prompts/, tests/) are excluded.
 USAGE
 }
+
+# Return the list of framework adapter directory names (one per line).
+# A framework adapter is a direct subdirectory of ROOT that contains
+# an executable bootstrap script, excluding known non-framework dirs.
+discover_frameworks() {
+  local d
+  for d in "$ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    local name="${d%/}"
+    name="${name##*/}"
+    case "$name" in
+      mcp|lib|plugin|prompts|tests|docs|webui|requirements.txt) continue ;;
+      # Exclude dotfiles and hidden dirs
+      .*) continue ;;
+    esac
+    if [[ -x "$d/bootstrap" ]]; then
+      echo "$name"
+    fi
+  done
+}
+
 run_in() {
   local dir="$1" sub="$2"
   [[ -x "$ROOT/$dir/bootstrap" ]] || { echo "missing $ROOT/$dir/bootstrap" >&2; return 2; }
   bash "$ROOT/$dir/bootstrap" "$sub"
 }
+
 case "${1:-help}" in
-  agent-zero)   run_in agent-zero   "${2:-install}" ;;
-  hermes-agent) run_in hermes-agent "${2:-install}" ;;
   mcp)
     # MCP server install is framework-agnostic; lives at the adapter collection root.
     [[ -f "$ROOT/mcp/server.py" ]] && echo "[mcp] server.py present; install is framework-level (handled by adapter)" || echo "[mcp] no server.py yet"
     ;;
   all)
-    for d in agent-zero hermes-agent; do run_in "$d" install; done
+    while IFS= read -r fw; do
+      [[ -n "$fw" ]] && run_in "$fw" install
+    done < <(discover_frameworks)
     ;;
   seed)
-    for d in agent-zero hermes-agent; do run_in "$d" seed; done
+    while IFS= read -r fw; do
+      [[ -n "$fw" ]] && run_in "$fw" seed
+    done < <(discover_frameworks)
     ;;
-  verify)  for d in agent-zero hermes-agent; do run_in "$d" verify;  done ;;
-  status)  for d in agent-zero hermes-agent; do run_in "$d" status;  done ;;
-  reset)   log="[bootstrap] reset is a no-op for adapter collection"; echo "$log" ;;
+  verify)
+    while IFS= read -r fw; do
+      [[ -n "$fw" ]] && run_in "$fw" verify
+    done < <(discover_frameworks)
+    ;;
+  status)
+    while IFS= read -r fw; do
+      [[ -n "$fw" ]] && run_in "$fw" status
+    done < <(discover_frameworks)
+    ;;
+  reset)
+    echo "[bootstrap] reset is a no-op for adapter collection"
+    ;;
   help|--help|-h|"") usage ;;
-  *) echo "unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
+  *)
+    # Treat unknown subcommand as a framework name (back-compat).
+    if [[ -x "$ROOT/$1/bootstrap" ]]; then
+      run_in "$1" "${2:-install}"
+    else
+      echo "unknown subcommand or framework: $1" >&2
+      usage >&2
+      exit 2
+    fi
+    ;;
 esac
