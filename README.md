@@ -23,9 +23,11 @@ data-layer-adapters/
 ├── mcp/                         # UNIVERSAL MCP server (not framework-specific)
 │   ├── server.py
 │   └── tools/
-├── langchain/                   # future
-└── crewai/                      # future
 ```
+
+> **MVP framework set:** `agent-zero` and `hermes-agent` only. No
+> additional framework adapters are planned. Adding a new framework
+> requires a new ADR.
 
 ## Per-adapter commands
 

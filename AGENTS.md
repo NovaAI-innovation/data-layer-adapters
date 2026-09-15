@@ -21,8 +21,10 @@ framework tool variants live under `mcp/tools/<framework>/` if needed.
   plugin/, prompts/, seeds/. Seeds run AFTER the postgres schema.
 - `hermes-agent/` — Hermes framework family (Nous Research). Same
   shape as agent-zero. The two are peers; neither depends on the other.
-- Future framework adapters (`langchain/`, `crewai/`) follow the same
-  shape.
+
+**MVP framework set:** `agent-zero` + `hermes-agent` ONLY. No
+additional framework adapters are planned. Adding a new framework
+requires a new ADR (see `docs/decisions/`).
 
 ## Required workflow
 

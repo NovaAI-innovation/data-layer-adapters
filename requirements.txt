@@ -1,0 +1,13 @@
+# data-layer-adapters/requirements.txt
+#
+# Python runtime dependencies for the framework-adapter collection.
+# Pinned to compatible-release ranges so security patches auto-resolve.
+
+# Postgres client (libpq-based)
+psycopg[binary]>=3.1,<4
+
+# Redis client (covers the dual-write cache + pub/sub channels)
+redis>=5.0,<7
+
+# For tests / future tooling (kept here to pin once)
+pyyaml>=6.0,<7
