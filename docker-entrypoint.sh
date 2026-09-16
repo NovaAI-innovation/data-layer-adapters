@@ -34,12 +34,23 @@ case "${ADAPTER_ROLE:-hook}" in
         log "running dual_write_smoke once"
         bash /app/tests/dual_write_smoke.sh
         ;;
-    help|--help|-h|"")
+    agent-zero)
+        log "agent-zero bootstrap: install + seed (one-shot)"
+        export DATA_LAYER_POSTGRES_DSN="${DATA_LAYER_POSTGRES_DSN:-postgresql://postgres@postgres:5432/postgres}"
+        bash /app/agent-zero/bootstrap install
+        # seed default agent (idempotent; uses DATA_LAYER_RUN_MIGRATE for optional migrate_local_id)
+        DATA_LAYER_RUN_MIGRATE="${DATA_LAYER_RUN_MIGRATE:-1}" bash /app/agent-zero/bootstrap seed
+        # Keep the container alive so `docker compose ps` shows healthy + logs are inspectable.
+        # Operators can `docker compose exec agent-zero bash` to inspect the seeded agent row.
+        log "agent-zero bootstrap complete; entering idle (tail -f /dev/null)"
+        exec tail -f /dev/null
+        ;;
+        help|--help|-h|"")
         cat <<USAGE
-Usage: $0 <hook|mcp|smoke|help>
+Usage: $0 <hook|mcp|smoke|agent-zero|help>
 
 Environment:
-  ADAPTER_ROLE                      hook (default) | mcp | smoke | help
+  ADAPTER_ROLE                      hook (default) | mcp | smoke | agent-zero | help
   DATA_LAYER_POSTGRES_DSN           postgres connection string
   DATA_LAYER_REDIS_URL              redis URL (default redis://127.0.0.1:6379/0)
   DATA_LAYER_REDIS_HOST             redis host (used by healthcheck)
