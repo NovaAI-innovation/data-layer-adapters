@@ -113,8 +113,14 @@ def apply_session_limits(
     """Apply per-transaction statement_timeout to a psycopg cursor.
 
     Must be called inside an explicit transaction (BEGIN ... COMMIT).
+
+    Note: SET LOCAL does NOT accept bind parameters in PostgreSQL
+    (it expects an integer literal in the SQL text). We therefore
+    inline the int via f-string. ``statement_timeout_ms`` is
+    validated upstream by callers; the explicit ``int(...)`` cast
+    here is belt-and-suspenders for defense in depth.
     """
-    cur.execute("SET LOCAL statement_timeout = %s", (int(statement_timeout_ms),))
+    cur.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")
 
 
 def jsonify(value: Any) -> Any:
