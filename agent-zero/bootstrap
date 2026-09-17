@@ -22,9 +22,16 @@ seed_one() {
 }
 case "${1:-help}" in
   install)
-    bash "$ROOT/lib/deps.sh"
+    # Note: deps.sh (psycopg + mcp install into /opt/venv-a0) is intentionally
+    # NOT called here. In the A0-first compose flow, a0-init populates the
+    # shared /opt/venv-a0 volume using the A0 image's own pip (libc-compatible
+    # with the A0 runtime that reuses this volume). Calling deps.sh from the
+    # adapters image would attempt to execute A0-image-linked binaries from a
+    # different glibc base — ELF interpreter not found.
+    # The adapters image already ships psycopg[binary] (requirements.txt);
+    # wiring only needs plugin copy + seed.
     bash "$ROOT/lib/plugin.sh"
-    log "install complete"
+    log "install complete (deps skipped; a0-init owns the shared venv)"
     ;;
   verify)  log "verify: seed integrity check would go here"; exit 0 ;;
   status)  echo "DSN: $DSN"; echo "local container: $LOCAL_NAME"; exit 0 ;;
