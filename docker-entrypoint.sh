@@ -40,10 +40,12 @@ case "${ADAPTER_ROLE:-hook}" in
         bash /app/agent-zero/bootstrap install
         # seed default agent (idempotent; uses DATA_LAYER_RUN_MIGRATE for optional migrate_local_id)
         DATA_LAYER_RUN_MIGRATE="${DATA_LAYER_RUN_MIGRATE:-1}" bash /app/agent-zero/bootstrap seed
-        # Keep the container alive so `docker compose ps` shows healthy + logs are inspectable.
-        # Operators can `docker compose exec agent-zero bash` to inspect the seeded agent row.
-        log "agent-zero bootstrap complete; entering idle (tail -f /dev/null)"
-        exec tail -f /dev/null
+        # Exit 0 on success so downstream services can gate on
+        # depends_on: condition: service_completed_successfully
+        # (the a0 runtime boots only after wiring is complete).
+        # Inspect results via `docker compose logs agent-zero`.
+        log "agent-zero bootstrap complete (exit 0)"
+        exit 0
         ;;
         help|--help|-h|"")
         cat <<USAGE
